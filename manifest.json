@@ -1,0 +1,10 @@
+{
+	"id": "supabase-sync",
+	"name": "Supabase Sync",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Easy syncing of notes between devices using Supabase.",
+	"author": "pedrolucaslco",
+	"authorUrl": "https://pedrolucsalcosta.carrd.co",
+	"isDesktopOnly": false
+}
