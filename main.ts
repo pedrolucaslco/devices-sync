@@ -19,12 +19,15 @@ export default class SupabaseSyncPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
-		this.bucketName = "notes";
+		if (this.settings.supabaseUrl || this.settings.supabaseKey) {
+			this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+			this.bucketName = "notes";
+		} 
 
 		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('cloud', 'Sample Plugin', (evt: MouseEvent) => {
-			new Notice('This is a notice!');
+		const ribbonIconEl = this.addRibbonIcon('cloud', 'Sample Plugin', async () => {
+			new Notice('Starting sync...');
+			await this.syncNotes();
 		});
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
@@ -39,7 +42,14 @@ export default class SupabaseSyncPlugin extends Plugin {
 	async syncNotes() {
 
 		if (!this.supabase) {
-			new Notice("Supabase not configured");
+			this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+			this.bucketName = "notes";
+
+			if (!this.supabase) {
+				new Notice("Supabase not configured");
+				return;
+			}
+
 			return;
 		}
 
@@ -47,6 +57,7 @@ export default class SupabaseSyncPlugin extends Plugin {
 		new Notice("Syncing notes...");
 
 		for (const file of files) {
+			new Notice(`Syncing ${file.path}`);
 			const localContent = await this.app.vault.read(file);
 			const { data, error } = await this.supabase
 				.storage
@@ -54,7 +65,7 @@ export default class SupabaseSyncPlugin extends Plugin {
 				.download(file.path);
 
 			if (error && error.message !== "The resource was not found") {
-				new Notice(`Error downloading: ${file.path}`);
+				new Notice(`Error downloading: ${file.path} - ${JSON.stringify(error)}`);
 				console.error(error);
 				continue;
 			}
