@@ -1,10 +1,10 @@
 {
-	"id": "supabase-sync",
-	"name": "Supabase Sync",
+	"id": "devices-sync",
+	"name": "Devices Sync",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Easy syncing of notes between devices using Supabase.",
+	"description": "Sync your Obsidian vault across devices via Supabase.",
 	"author": "pedrolucaslco",
 	"authorUrl": "https://pedrolucsalcosta.carrd.co",
-	"isDesktopOnly": false
+	"isDesktopOnly": false,
 }

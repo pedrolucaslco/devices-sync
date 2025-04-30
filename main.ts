@@ -1,98 +1,119 @@
+/**
+ * Obsidian Plugin: Devices Sync
+ * Description: Sync your Obsidian vault with Supabase storage
+ */
+
 import { createClient } from '@supabase/supabase-js';
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { addIcon, App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 
-interface SupabaseSyncSettings {
-	supabaseUrl: string;
-	supabaseKey: string;
-}
+const SYNC_ICON = `
+<svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6a6 6 0 0 1-6 6c-1.87 0-3.52-.85-4.62-2.18l-1.45 1.36A7.982 7.982 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8z"/></svg>
+`;
 
-const DEFAULT_SETTINGS: SupabaseSyncSettings = {
-	supabaseUrl: '',
-	supabaseKey: '',
-}
-1
-export default class SupabaseSyncPlugin extends Plugin {
-	settings: SupabaseSyncSettings;
-	supabase: any;
-	bucketName: string;
+addIcon('sync-icon', SYNC_ICON);
+
+export default class DevicesSyncPlugin extends Plugin {
+	settings: { supabaseUrl: string; supabaseKey: string };
+	modifiedFiles: Set<string> = new Set();
+	intervalId: NodeJS.Timeout | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		if (this.settings.supabaseUrl || this.settings.supabaseKey) {
-			this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
-			this.bucketName = "notes";
-		} 
+		this.addSettingTab(new DevicesSyncSettingTab(this.app, this));
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('cloud', 'Sample Plugin', async () => {
-			new Notice('Starting sync...');
-			await this.syncNotes();
+		// Botão manual na sidebar
+		this.addRibbonIcon('sync-icon', 'Sync Now', async () => {
+			await this.syncNow();
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SyncSettingTab(this.app, this));
+		// Escuta modificações
+		this.registerEvent(
+			this.app.vault.on('modify', (file: TFile) => {
+				// if (file.extension === 'md') {
+					this.modifiedFiles.add(file.path);
+				// }
+			})
+		);
 
+		this.intervalId = setInterval(() => this.autoSync(), 5000);
 	}
 
 	onunload() {
-
+		if (this.intervalId) clearInterval(this.intervalId);
 	}
 
-	async syncNotes() {
-
-		if (!this.supabase) {
-			this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
-			this.bucketName = "notes";
-
-			if (!this.supabase) {
-				new Notice("Supabase not configured");
-				return;
-			}
-
-			return;
-		}
-
-		const files = this.app.vault.getFiles();
-		new Notice("Syncing notes...");
-
-		for (const file of files) {
-			new Notice(`Syncing ${file.path}`);
-			const localContent = await this.app.vault.read(file);
-			const { data, error } = await this.supabase
-				.storage
-				.from(this.bucketName)
-				.download(file.path);
-
-			if (error && error.message !== "The resource was not found") {
-				new Notice(`Error downloading: ${file.path} - ${JSON.stringify(error)}`);
-				console.error(error);
-				continue;
-			}
-
-			const remoteContent = data ? await data.text() : "";
-
-			let shouldUpload = false;
+	async autoSync() {
+		if (this.modifiedFiles.size > 0) {
 			
-			if (!data) {
-				shouldUpload = true;
-			} else {
-				shouldUpload = localContent.length > remoteContent.length;
-			}
+			new Notice("Running autoSync...");
 
-			if (shouldUpload) {
-				await this.supabase.storage.from(this.bucketName).upload(file.path, localContent, { upsert: true });
-			} else {
-				await this.app.vault.modify(file, remoteContent);
-			}
+			const files = Array.from(this.modifiedFiles);
+			this.modifiedFiles.clear();
+			await this.upload(files);
 		}
-
-		new Notice("Sync complete!");
 	}
 
+	async syncNow() {
+		const allFiles = this.app.vault.getFiles().map(f => f.path);
+		await this.upload(allFiles);
+		await this.download();
+	}
+
+	async upload(paths: string[]) {
+		const supabase = this.getSupabaseClient();
+		for (const path of paths) {
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (!(file instanceof TFile)) continue;
+
+			const content = await this.app.vault.read(file);
+			const alias = this.getAlias(path);
+
+			const metadata = {
+				updated_at: Date.now(),
+				alias,
+				original_name: path,
+			};
+
+			await supabase.from('notes').upsert({
+				id: alias,
+				content,
+				metadata,
+			});
+		}
+	}
+
+	async download() {
+		const supabase = this.getSupabaseClient();
+		const { data } = await supabase.from('notes').select('*');
+		if (!data) return;
+
+		for (const note of data) {
+			const file = this.app.vault.getAbstractFileByPath(note.metadata.original_name);
+			const localFile = file instanceof TFile ? file : null;
+			const localTimestamp = localFile ? localFile.stat.mtime : 0;
+
+			if (note.metadata.updated_at > localTimestamp) {
+				await this.app.vault.modify(localFile!, note.content);
+			}
+		}
+	}
+
+	getAlias(path: string): string {
+		return encodeURIComponent(path);
+	}
+
+	getSupabaseClient() {
+		// Requires supabase-js to be installed in plugin
+		// Assume globalThis.supabase is configured externally if needed
+		return createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign({
+			supabaseUrl: '',
+			supabaseKey: '',
+		}, await this.loadData());
 	}
 
 	async saveSettings() {
@@ -100,10 +121,10 @@ export default class SupabaseSyncPlugin extends Plugin {
 	}
 }
 
-class SyncSettingTab extends PluginSettingTab {
-	plugin: SupabaseSyncPlugin;
+class DevicesSyncSettingTab extends PluginSettingTab {
+	plugin: DevicesSyncPlugin;
 
-	constructor(app: App, plugin: SupabaseSyncPlugin) {
+	constructor(app: App, plugin: DevicesSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -112,12 +133,12 @@ class SyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 
 		containerEl.empty();
+		containerEl.createEl('h2', { text: 'Devices Sync Settings' });
 
 		new Setting(containerEl)
 			.setName('Supabase URL')
-			.setDesc('The URL of your Supabase instance')
 			.addText(text => text
-				.setPlaceholder('Enter your Supabase URL')
+				.setPlaceholder('https://your-project.supabase.co')
 				.setValue(this.plugin.settings.supabaseUrl)
 				.onChange(async (value) => {
 					this.plugin.settings.supabaseUrl = value;
@@ -126,13 +147,18 @@ class SyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Supabase Key')
-			.setDesc('The API key of your Supabase instance')
 			.addText(text => text
-				.setPlaceholder('Enter your Supabase Key')
+				.setPlaceholder('Your Supabase Anon/Public Key')
 				.setValue(this.plugin.settings.supabaseKey)
 				.onChange(async (value) => {
 					this.plugin.settings.supabaseKey = value;
 					await this.plugin.saveSettings();
 				}));
+
+		containerEl.createEl('a', {
+			text: 'Veja como configurar no Supabase',
+			href: 'https://supabase.com/docs/guides/with-js',
+			attr: { target: '_blank' }
+		});
 	}
 }
