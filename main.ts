@@ -151,7 +151,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		const latestFiles: Record<string, { name: string; timestamp: number }> = {};
 
 		for (const file of fileList) {
-			const match = file.name.match(/^(.*)__([0-9]+)\.md$/);
+			const match = file.name.match(/^(.*)__([0-9]+)\.(.+)$/);
 			if (!match) continue;
 
 			const [_, alias, tsStr] = match;
@@ -163,7 +163,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		}
 
 		for (const alias in latestFiles) {
-			const { name } = latestFiles[alias];
+			const { name, timestamp } = latestFiles[alias];
 			const { data: fileData } = await supabase.storage.from(this.bucketName).download(name);
 			if (!fileData) continue;
 
@@ -172,10 +172,29 @@ export default class DevicesSyncPlugin extends Plugin {
 			const path = decodeURIComponent(alias);
 			const localFile = this.app.vault.getAbstractFileByPath(path);
 			const localTimestamp = localFile instanceof TFile ? localFile.stat.mtime : 0;
+			const content = await fileData.text();
 
-			if (latestFiles[alias].timestamp > localTimestamp && localFile instanceof TFile) {
-				const content = await fileData.text();
-				await this.app.vault.modify(localFile, content);
+			if (localFile instanceof TFile) {
+				if (timestamp > localTimestamp) {
+					await this.app.vault.modify(localFile, content);
+				}
+			} else {
+				await this.createMissingFolders(path);
+				await this.app.vault.create(path, content);
+				console.log('created file', path);
+			}
+		}
+	}
+
+	async createMissingFolders(filePath: string) {
+		const folders = filePath.split('/');
+		folders.pop(); // Remove o nome do arquivo
+
+		let currentPath = '';
+		for (const folder of folders) {
+			currentPath += (currentPath ? '/' : '') + folder;
+			if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+				await this.app.vault.createFolder(currentPath);
 			}
 		}
 	}
