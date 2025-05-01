@@ -4,13 +4,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import { addIcon, App, Editor, MarkdownView, Modal, normalizePath, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
-
-const SYNC_ICON = `
-<svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6a6 6 0 0 1-6 6c-1.87 0-3.52-.85-4.62-2.18l-1.45 1.36A7.982 7.982 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8z"/></svg>
-`;
-
-addIcon('sync-icon', SYNC_ICON);
+import { App, normalizePath, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 
 export default class DevicesSyncPlugin extends Plugin {
 	settings: { supabaseUrl: string; supabaseKey: string };
@@ -27,18 +21,9 @@ export default class DevicesSyncPlugin extends Plugin {
 			await this.syncNow();
 		});
 
-		this.addRibbonIcon('trash-2', 'Clean Old Versions', async () => {
-			await this.cleanOldVersionsForAllFiles();
-			new Notice('Old versions cleaned!');
-		});
-
-
-		// Escuta modificações
 		this.registerEvent(
 			this.app.vault.on('modify', (file: TFile) => {
-				// if (file.extension === 'md') {
 				this.modifiedFiles.add(file.path);
-				// }
 			})
 		);
 
@@ -51,9 +36,7 @@ export default class DevicesSyncPlugin extends Plugin {
 
 	async autoSync() {
 		if (this.modifiedFiles.size > 0) {
-
 			new Notice("Running autoSync...");
-
 			const files = Array.from(this.modifiedFiles);
 			this.modifiedFiles.clear();
 			await this.upload(files);
@@ -62,10 +45,8 @@ export default class DevicesSyncPlugin extends Plugin {
 
 	async syncNow() {
 		new Notice('Syncing...');
-
-		const allFilePaths = this.app.vault.getFiles().map(f => f.path);
-
-		await this.upload(allFilePaths);
+		const allFiles = this.app.vault.getFiles().map(f => f.path);
+		await this.upload(allFiles);
 		await this.download();
 	}
 
@@ -74,71 +55,37 @@ export default class DevicesSyncPlugin extends Plugin {
 
 		for (const path of paths) {
 			const file = this.app.vault.getAbstractFileByPath(path);
-
 			if (!(file instanceof TFile)) continue;
 
+			const content = await this.app.vault.readBinary(file);
 			const alias = this.getAlias(path);
 			const timestamp = Date.now();
-
+			console.log('alias', alias);
 			const ext = file.extension;
 			const filename = `${alias}__${timestamp}.${ext}`;
+			const mime = this.getMimeType(ext);
 
-			const arrayBuffer = await this.app.vault.readBinary(file);
-			const fileBlob = new Blob([arrayBuffer], { type: this.getMimeType(file.extension) });
+			const listResp = await supabase.storage.from(this.bucketName).list('', { limit: 1000 });
+			if (listResp.data) {
+				const regex = new RegExp(`^${alias}__\\d+\\.${ext}$`);
+				for (const entry of listResp.data) {
+					if (regex.test(entry.name)) {
+						await supabase.storage.from(this.bucketName).remove([entry.name]);
+					}
+				}
+			}
 
+			const fileBlob = new Blob([content], { type: mime });
 			await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
 
+			// Armazenando o nome original como metadado
+			// const metadata = {
+			// 	originalName: file.name
+			// };
+
+			// Salva metadados no bucket (opcionalmente em um arquivo JSON ou outro método)
+			// await supabase.storage.from(this.bucketName).upload(`${filename}.json`, new Blob([JSON.stringify(metadata)], { type: 'application/json' }), { upsert: true });
 		}
-	}
-
-	async cleanOldVersionsForAllFiles() {
-		const supabase = this.getSupabaseClient();
-
-		// Lista todos os arquivos no bucket
-		const { data: fileList } = await supabase.storage.from(this.bucketName).list('', {
-			limit: 1000, // Limite de arquivos
-		});
-
-		if (!fileList) return;
-
-		const filesGroupedByAlias: Record<string, { name: string; timestamp: number }[]> = {};
-
-		// Organiza os arquivos por alias
-		fileList.forEach(file => {
-			const alias = this.getAliasFromFileName(file.name);
-			const timestamp = parseInt(file.name.split('__')[1]?.split('.')[0] || '0'); // Extraímos o timestamp
-
-			if (!filesGroupedByAlias[alias]) {
-				filesGroupedByAlias[alias] = [];
-			}
-
-			filesGroupedByAlias[alias].push({
-				name: file.name,
-				timestamp: timestamp,
-			});
-		});
-
-		// Para cada alias, mantém apenas as 3 versões mais recentes
-		for (const alias in filesGroupedByAlias) {
-			const files = filesGroupedByAlias[alias];
-
-			// Ordena os arquivos por timestamp decrescente
-			const sortedFiles = files.sort((a, b) => b.timestamp - a.timestamp);
-
-			// Arquivos a serem excluídos (mais antigos que os 3 mais recentes)
-			const filesToDelete = sortedFiles.slice(3);
-
-			// Exclui os arquivos mais antigos
-			for (const file of filesToDelete) {
-				await supabase.storage.from(this.bucketName).remove([file.name]);
-			}
-		}
-	}
-
-	// Função para obter o alias a partir do nome do arquivo
-	getAliasFromFileName(fileName: string): string {
-		const aliasMatch = fileName.split('__')[0];
-		return aliasMatch ? decodeURIComponent(aliasMatch) : '';
 	}
 
 	async download() {
@@ -148,42 +95,60 @@ export default class DevicesSyncPlugin extends Plugin {
 
 		console.log('fileList', fileList);
 
-		const latestFiles: Record<string, { name: string; timestamp: number }> = {};
+		const latestFiles: Record<string, { name: string; timestamp: number; ext: string }> = {};
 
 		for (const file of fileList) {
 			const match = file.name.match(/^(.*)__([0-9]+)\.(.+)$/);
 			if (!match) continue;
 
-			const [_, alias, tsStr] = match;
+			const [_, alias, tsStr, ext] = match;
 			const timestamp = parseInt(tsStr);
 
 			if (!latestFiles[alias] || timestamp > latestFiles[alias].timestamp) {
-				latestFiles[alias] = { name: file.name, timestamp };
+				latestFiles[alias] = { name: file.name, timestamp, ext };
 			}
 		}
 
 		for (const alias in latestFiles) {
-			const { name, timestamp } = latestFiles[alias];
+			const { name, ext } = latestFiles[alias];
 			const { data: fileData } = await supabase.storage.from(this.bucketName).download(name);
 			if (!fileData) continue;
 
-			console.log('downloaded fileData', fileData);
-
 			const path = decodeURIComponent(alias);
 			const localFile = this.app.vault.getAbstractFileByPath(path);
-			const localTimestamp = localFile instanceof TFile ? localFile.stat.mtime : 0;
-			const content = await fileData.text();
 
-			if (localFile instanceof TFile) {
-				if (timestamp > localTimestamp) {
-					await this.app.vault.modify(localFile, content);
+			if (!localFile) {
+				const arrayBuffer = await fileData.arrayBuffer();
+				await this.app.vault.createBinary(path, arrayBuffer);
+			} else if (localFile instanceof TFile) {
+				const localTimestamp = localFile.stat.mtime;
+				if (latestFiles[alias].timestamp > localTimestamp) {
+					const arrayBuffer = await fileData.arrayBuffer();
+					await this.app.vault.modifyBinary(localFile, arrayBuffer);
 				}
-			} else {
-				await this.createMissingFolders(path);
-				await this.app.vault.create(path, content);
-				console.log('created file', path);
 			}
 		}
+	}
+
+	// encodeSpecialChars(path: string): string {
+	// 	// Verifica se o nome contém caracteres especiais (não alfanuméricos)
+	// 	const specialCharsRegex = /[^a-zA-Z0-9\-_.]/;
+	// 	if (specialCharsRegex.test(path)) {
+	// 		// Se encontrar caracteres especiais, codifica em base64
+	// 		return path
+	// 			.split('')
+	// 			.map((char) => (specialCharsRegex.test(char) ? TextEncoder .encode(char).toString('base64') : char))
+	// 			.join('');
+	// 	}
+	// 	// Se não encontrar caracteres especiais, retorna o caminho original
+	// 	return path;
+	// }
+
+
+	// Função para obter o alias a partir do nome do arquivo
+	getAliasFromFileName(fileName: string): string {
+		const aliasMatch = fileName.split('__')[0];
+		return aliasMatch ? decodeURIComponent(aliasMatch) : '';
 	}
 
 	async createMissingFolders(filePath: string) {
@@ -270,11 +235,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		return types[ext.toLowerCase()] || 'application/octet-stream';
 	}
 
-
-
 	getSupabaseClient() {
-		// Requires supabase-js to be installed in plugin
-		// Assume globalThis.supabase is configured externally if needed
 		return createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
 	}
 
