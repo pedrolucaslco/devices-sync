@@ -1,8 +1,3 @@
-/**
- * Obsidian Plugin: Devices Sync
- * Description: Sync your Obsidian vault with Supabase storage
- */
-
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { App, normalizePath, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 
@@ -14,11 +9,9 @@ export default class DevicesSyncPlugin extends Plugin {
 
 	async onload() {
 
-		// Load settings
 		await this.loadSettings();
 		this.addSettingTab(new DevicesSyncSettingTab(this.app, this));
 
-		// Add button to sidebar
 		this.addRibbonIcon('circle-fading-arrow-up', 'Sync Now', async () => {
 			await this.syncFiles();
 		});
@@ -28,6 +21,9 @@ export default class DevicesSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('create', (file: TFile) => {
 				if (this.app.vault.getAbstractFileByPath(file.path)) {
+
+					new Notice('Syncing created file...');
+
 					console.log('creating file: ' + file.path);
 					this.uploadFile(file.path);
 				}
@@ -37,6 +33,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('modify', (file: TFile) => {
 				if (this.app.vault.getAbstractFileByPath(file.path)) {
+					new Notice('Syncing modified file...');
 					console.log('modifying file: ' + file.path);
 					this.uploadFile(file.path);
 				}
@@ -48,6 +45,7 @@ export default class DevicesSyncPlugin extends Plugin {
 				if (this.app.vault.getAbstractFileByPath(file.path)) {
 					console.log('deleting file: ' + file.path);
 					// implementar
+					new Notice('Deleted file sync not implemented yet');
 				}
 			})
 		);
@@ -57,6 +55,7 @@ export default class DevicesSyncPlugin extends Plugin {
 				if (this.app.vault.getAbstractFileByPath(oldPath)) {
 					console.log('renaming file: ' + oldPath);
 					// implementar
+					new Notice('Renamed file sync not implemented yet');
 				}
 			})
 		);
@@ -183,7 +182,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		this.uploadFile(newFileName);
 	}
 
-	async downloadFile(path: string, newPath: string | null ) {
+	async downloadFile(path: string, newPath: string | null) {
 		console.log('downloadFile', path);
 
 		const supabase = this.getSupabaseClient();
@@ -214,14 +213,12 @@ export default class DevicesSyncPlugin extends Plugin {
 		const text = await metaDataResponse.text();
 		const metaData = JSON.parse(text);
 
-		// -----------------------------------------------------------------
-
 		var localPath = metaData.originalPath;
 
 		if (newPath !== null) {
 			localPath = newPath;
 		}
-		
+
 		const localFile = this.app.vault.getAbstractFileByPath(localPath);
 
 		if (!localFile) {
@@ -234,7 +231,7 @@ export default class DevicesSyncPlugin extends Plugin {
 
 			const arrayBuffer = await fileData.arrayBuffer();
 			await this.app.vault.modifyBinary(localFile, arrayBuffer);
-			
+
 		} else {
 			console.log('localFile not TFile, skipping');
 		}
@@ -264,12 +261,6 @@ export default class DevicesSyncPlugin extends Plugin {
 					this.downloadFile(file.path, null); // novo remoto, baixa
 				}
 			}
-
-			// - se o arquivo existe na nuvem mas não no local, baixa
-			// - se o arquivo existe local mas não na nuvem, upload/
-			// - se o arquivo existe nos dois locais, compara timestamp
-			// - se timestamp for igual, não faz nada
-			// - se for diferente, baixa arquivo como cópia e upload mesmo arquivo
 		}
 
 		// 3. Baixar novos arquivos da nuvem
