@@ -3,166 +3,244 @@
  * Description: Sync your Obsidian vault with Supabase storage
  */
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { App, normalizePath, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 
 export default class DevicesSyncPlugin extends Plugin {
 	settings: { supabaseUrl: string; supabaseKey: string };
-	modifiedFiles: Set<string> = new Set();
-	intervalId: NodeJS.Timeout | null = null;
 	bucketName: string = 'notes';
 
+	private supabaseClient: SupabaseClient | null = null;
+
 	async onload() {
+
+		// Load settings
 		await this.loadSettings();
 		this.addSettingTab(new DevicesSyncSettingTab(this.app, this));
 
-		// Botão manual na sidebar
+		// Add button to sidebar
 		this.addRibbonIcon('circle-fading-arrow-up', 'Sync Now', async () => {
-			await this.syncNow();
+			await this.syncFiles();
 		});
 
 		this.registerEvent(
 			this.app.vault.on('modify', (file: TFile) => {
-				this.modifiedFiles.add(file.path);
+				if (this.app.vault.getAbstractFileByPath(file.path)) {
+					this.uploadFile(file.path);
+				}
 			})
 		);
-
-		this.intervalId = setInterval(() => this.autoSync(), 5000);
 	}
 
 	onunload() {
-		if (this.intervalId) clearInterval(this.intervalId);
+
 	}
 
-	async autoSync() {
-		if (this.modifiedFiles.size > 0) {
-			new Notice("Running autoSync...");
-			const files = Array.from(this.modifiedFiles);
-			this.modifiedFiles.clear();
-			await this.upload(files);
+	async getLocalFiles() {
+		return this.app.vault.getFiles().map(file => ({
+			name: file.name,
+			path: file.path,
+			timestamp: file.stat.mtime,
+		}));
+	}
+
+	async getRemoteFiles() {
+		const supabase = this.getSupabaseClient();
+
+		const { data: cloudFilesList } = await supabase.storage
+			.from(this.bucketName)
+			.list('', { limit: 1000 });
+
+		const cloudFiles: { name: string; path: string; timestamp: number }[] = [];
+
+		for (const file of cloudFilesList || []) {
+			if (!file.name.endsWith('.meta.json')) continue;
+
+			const path = file.name;
+			const metaPath = path;
+
+			const { data: metaDataResponse, error } = await supabase.storage
+				.from(this.bucketName)
+				.download(metaPath);
+
+			if (error || !metaDataResponse) {
+				console.warn(`Meta não encontrada para: ${metaPath}`);
+				continue;
+			}
+
+			const text = await metaDataResponse.text();
+			const metaData = JSON.parse(text);
+
+			cloudFiles.push({
+				name: file.name.replace('.meta.json', ''),
+				path: path.replace('.meta.json', ''),
+				timestamp: metaData.timeStamp,
+			});
+		}
+
+		return cloudFiles;
+	}
+
+	async uploadFile(path: string) {
+		console.log('uploadFile', path);
+
+		const supabase = this.getSupabaseClient();
+
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return;
+
+		const content = await this.app.vault.readBinary(file);
+		const alias = this.getAlias(file.path);
+		const ext = file.extension;
+		const filename = `${alias}`;
+		const mime = this.getMimeType(ext);
+
+		const fileBlob = new Blob([content], { type: mime });
+
+		await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
+
+		const metadata = {
+			originalName: file.name,
+			originalPath: file.path,
+			timeStamp: file.stat.mtime,
+		};
+
+		await supabase.storage.from(this.bucketName).upload(`${filename}.meta.json`,
+			new Blob([JSON.stringify(metadata)], { type: 'application/json' }),
+			{ upsert: true }
+		);
+	}
+
+	async updateRemote(path: string) {
+		console.log('updateRemote', path);
+
+		const supabase = this.getSupabaseClient();
+
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return;
+
+		const content = await this.app.vault.readBinary(file);
+		const alias = this.getAlias(file.path);
+		const ext = file.extension;
+		const filename = `${alias}`;
+		const mime = this.getMimeType(ext);
+
+		const fileBlob = new Blob([content], { type: mime });
+
+		await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
+
+		const metadata = {
+			originalName: file.name,
+			originalPath: file.path,
+			timeStamp: file.stat.mtime,
+		};
+
+		await supabase.storage.from(this.bucketName).upload(`${filename}.meta.json`,
+			new Blob([JSON.stringify(metadata)], { type: 'application/json' }),
+			{ upsert: true }
+		);
+	}
+
+	async uploadFileAsNew(path: string) {
+		console.log('uploadFileAsNew', path);
+
+		// change file name to originalName + '(copy)'
+		// call uploadFile with new name
+
+		const alias = path.split('.')[0];
+		const ext = path.split('.').pop();
+		const newFileName = `${alias} 1.${ext}`;
+
+		this.uploadFile(newFileName);
+	}
+
+	async downloadFile(path: string) {
+		console.log('downloadFile', path);
+
+		const supabase = this.getSupabaseClient();
+
+		const { data: fileData } = await supabase.storage
+			.from(this.bucketName)
+			.download(path);
+
+		if (!fileData) {
+			console.warn(`Arquivo não encontrado na nuvem: ${path}`);
+			return;
+		}
+
+		const { data: metaDataResponse, error } = await supabase.storage
+			.from(this.bucketName)
+			.download(`${path}.meta.json`);
+
+		if (error) {
+			console.error('Erro ao baixar arquivo .meta.json:', error);
+			return;
+		}
+
+		if (!metaDataResponse) {
+			console.warn(`Meta não encontrada para: ${path}.meta.json`);
+			return;
+		}
+
+		const text = await metaDataResponse.text();
+		const metaData = JSON.parse(text);
+
+		// -----------------------------------------------------------------
+
+		const originalPath = metaData.originalPath;
+
+		const localFile = this.app.vault.getAbstractFileByPath(originalPath);
+
+		if (!localFile) {
+			console.log('localFile not found, creating new file');
+
+			const arrayBuffer = await fileData.arrayBuffer();
+			await this.app.vault.createBinary(path, arrayBuffer);
 		}
 	}
 
-	async syncNow() {
+	async syncFiles() {
+
 		new Notice('Syncing...');
-		const allFiles = this.app.vault.getFiles().map(f => f.path);
-		await this.upload(allFiles);
-		await this.download();
-	}
 
-	async upload(paths: string[]) {
-		const supabase = this.getSupabaseClient();
+		const localFiles = await this.getLocalFiles();
 
-		for (const path of paths) {
-			const file = this.app.vault.getAbstractFileByPath(path);
-			if (!(file instanceof TFile)) continue;
+		console.log('localFiles', localFiles);
 
-			const content = await this.app.vault.readBinary(file);
-			const alias = this.getAlias(path);
-			const timestamp = Date.now();
-			console.log('alias', alias);
-			const ext = file.extension;
-			const filename = `${alias}__${timestamp}.${ext}`;
-			const mime = this.getMimeType(ext);
+		const remoteFiles = await this.getRemoteFiles();
 
-			const listResp = await supabase.storage.from(this.bucketName).list('', { limit: 1000 });
-			if (listResp.data) {
-				const regex = new RegExp(`^${alias}__\\d+\\.${ext}$`);
-				for (const entry of listResp.data) {
-					if (regex.test(entry.name)) {
-						await supabase.storage.from(this.bucketName).remove([entry.name]);
-					}
-				}
-			}
+		for (const file of localFiles) {
+			const remote = remoteFiles.find(f => f.path === file.path);
 
-			const fileBlob = new Blob([content], { type: mime });
-			await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
-
-			// Armazenando o nome original como metadado
-			// const metadata = {
-			// 	originalName: file.name
-			// };
-
-			// Salva metadados no bucket (opcionalmente em um arquivo JSON ou outro método)
-			// await supabase.storage.from(this.bucketName).upload(`${filename}.json`, new Blob([JSON.stringify(metadata)], { type: 'application/json' }), { upsert: true });
-		}
-	}
-
-	async download() {
-		const supabase = this.getSupabaseClient();
-		const { data: fileList } = await supabase.storage.from(this.bucketName).list('', { limit: 1000 });
-		if (!fileList) return;
-
-		console.log('fileList', fileList);
-
-		const latestFiles: Record<string, { name: string; timestamp: number; ext: string }> = {};
-
-		for (const file of fileList) {
-			const match = file.name.match(/^(.*)__([0-9]+)\.(.+)$/);
-			if (!match) continue;
-
-			const [_, alias, tsStr, ext] = match;
-			const timestamp = parseInt(tsStr);
-
-			if (!latestFiles[alias] || timestamp > latestFiles[alias].timestamp) {
-				latestFiles[alias] = { name: file.name, timestamp, ext };
+			if (!remote) {
+				this.uploadFile(file.path); // novo em local, envia para a nuvem
+			} else if (file.timestamp > remote.timestamp) {
+				this.updateRemote(file.path); // edição local mais recente
+			} else if (file.timestamp < remote.timestamp) {
+				this.uploadFileAsNew(file.path); // edição local mais antiga
 			}
 		}
 
-		for (const alias in latestFiles) {
-			const { name, ext } = latestFiles[alias];
-			const { data: fileData } = await supabase.storage.from(this.bucketName).download(name);
-			if (!fileData) continue;
-
-			const path = decodeURIComponent(alias);
-			const localFile = this.app.vault.getAbstractFileByPath(path);
-
-			if (!localFile) {
-				const arrayBuffer = await fileData.arrayBuffer();
-				await this.app.vault.createBinary(path, arrayBuffer);
-			} else if (localFile instanceof TFile) {
-				const localTimestamp = localFile.stat.mtime;
-				if (latestFiles[alias].timestamp > localTimestamp) {
-					const arrayBuffer = await fileData.arrayBuffer();
-					await this.app.vault.modifyBinary(localFile, arrayBuffer);
-				}
+		// 3. Baixar novos arquivos da nuvem
+		for (const file of remoteFiles) {
+			if (!localFiles.find(f => f.path === file.path)) {
+				this.downloadFile(file.path); // novo remoto, baixa
 			}
 		}
 	}
 
-	// encodeSpecialChars(path: string): string {
-	// 	// Verifica se o nome contém caracteres especiais (não alfanuméricos)
-	// 	const specialCharsRegex = /[^a-zA-Z0-9\-_.]/;
-	// 	if (specialCharsRegex.test(path)) {
-	// 		// Se encontrar caracteres especiais, codifica em base64
-	// 		return path
-	// 			.split('')
-	// 			.map((char) => (specialCharsRegex.test(char) ? TextEncoder .encode(char).toString('base64') : char))
-	// 			.join('');
+	// async createMissingFolders(filePath: string) {
+	// 	const folders = filePath.split('/');
+	// 	folders.pop(); // Remove o nome do arquivo
+
+	// 	let currentPath = '';
+	// 	for (const folder of folders) {
+	// 		currentPath += (currentPath ? '/' : '') + folder;
+	// 		if (!this.app.vault.getAbstractFileByPath(currentPath)) {
+	// 			await this.app.vault.createFolder(currentPath);
+	// 		}
 	// 	}
-	// 	// Se não encontrar caracteres especiais, retorna o caminho original
-	// 	return path;
 	// }
-
-
-	// Função para obter o alias a partir do nome do arquivo
-	getAliasFromFileName(fileName: string): string {
-		const aliasMatch = fileName.split('__')[0];
-		return aliasMatch ? decodeURIComponent(aliasMatch) : '';
-	}
-
-	async createMissingFolders(filePath: string) {
-		const folders = filePath.split('/');
-		folders.pop(); // Remove o nome do arquivo
-
-		let currentPath = '';
-		for (const folder of folders) {
-			currentPath += (currentPath ? '/' : '') + folder;
-			if (!this.app.vault.getAbstractFileByPath(currentPath)) {
-				await this.app.vault.createFolder(currentPath);
-			}
-		}
-	}
 
 	getAlias(path: string): string {
 		return encodeURIComponent(normalizePath(path));
@@ -236,7 +314,10 @@ export default class DevicesSyncPlugin extends Plugin {
 	}
 
 	getSupabaseClient() {
-		return createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+		if (!this.supabaseClient) {
+			this.supabaseClient = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+		}
+		return this.supabaseClient;
 	}
 
 	async loadSettings() {
