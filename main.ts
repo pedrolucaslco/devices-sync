@@ -23,13 +23,44 @@ export default class DevicesSyncPlugin extends Plugin {
 			await this.syncFiles();
 		});
 
+		// LISTENERS
+
 		this.registerEvent(
-			this.app.vault.on('modify', (file: TFile) => {
+			this.app.vault.on('create', (file: TFile) => {
 				if (this.app.vault.getAbstractFileByPath(file.path)) {
+					console.log('creating file: ' + file.path);
 					this.uploadFile(file.path);
 				}
 			})
 		);
+
+		this.registerEvent(
+			this.app.vault.on('modify', (file: TFile) => {
+				if (this.app.vault.getAbstractFileByPath(file.path)) {
+					console.log('modifying file: ' + file.path);
+					this.uploadFile(file.path);
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on('delete', (file: TFile) => {
+				if (this.app.vault.getAbstractFileByPath(file.path)) {
+					console.log('deleting file: ' + file.path);
+					// implementar
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on('rename', (file: TFile, oldPath: string) => {
+				if (this.app.vault.getAbstractFileByPath(oldPath)) {
+					console.log('renaming file: ' + oldPath);
+					// implementar
+				}
+			})
+		);
+
 	}
 
 	onunload() {
@@ -141,20 +172,18 @@ export default class DevicesSyncPlugin extends Plugin {
 		);
 	}
 
-	async uploadFileAsNew(path: string) {
-		console.log('uploadFileAsNew', path);
-
-		// change file name to originalName + '(copy)'
-		// call uploadFile with new name
+	async makeACopy(path: string) {
+		console.log('makeACopy', path);
 
 		const alias = path.split('.')[0];
 		const ext = path.split('.').pop();
 		const newFileName = `${alias} 1.${ext}`;
 
+		this.downloadFile(path, newFileName);
 		this.uploadFile(newFileName);
 	}
 
-	async downloadFile(path: string) {
+	async downloadFile(path: string, newPath: string | null ) {
 		console.log('downloadFile', path);
 
 		const supabase = this.getSupabaseClient();
@@ -187,15 +216,27 @@ export default class DevicesSyncPlugin extends Plugin {
 
 		// -----------------------------------------------------------------
 
-		const originalPath = metaData.originalPath;
+		var localPath = metaData.originalPath;
 
-		const localFile = this.app.vault.getAbstractFileByPath(originalPath);
+		if (newPath !== null) {
+			localPath = newPath;
+		}
+		
+		const localFile = this.app.vault.getAbstractFileByPath(localPath);
 
 		if (!localFile) {
 			console.log('localFile not found, creating new file');
 
 			const arrayBuffer = await fileData.arrayBuffer();
 			await this.app.vault.createBinary(path, arrayBuffer);
+		} else if (localFile instanceof TFile) {
+			console.log('localFile found, overwriting file');
+
+			const arrayBuffer = await fileData.arrayBuffer();
+			await this.app.vault.modifyBinary(localFile, arrayBuffer);
+			
+		} else {
+			console.log('localFile not TFile, skipping');
 		}
 	}
 
@@ -210,21 +251,31 @@ export default class DevicesSyncPlugin extends Plugin {
 		const remoteFiles = await this.getRemoteFiles();
 
 		for (const file of localFiles) {
-			const remote = remoteFiles.find(f => f.path === file.path);
 
-			if (!remote) {
+			const existsInRemote = remoteFiles.find(f => f.path === file.path);
+			const existsInLocal = localFiles.find(f => f.path === file.path);
+
+			if (existsInRemote && !existsInLocal) {
+				this.downloadFile(file.path, null); // novo remoto, baixa
+			} else if (existsInLocal && !existsInRemote) {
 				this.uploadFile(file.path); // novo em local, envia para a nuvem
-			} else if (file.timestamp > remote.timestamp) {
-				this.updateRemote(file.path); // edição local mais recente
-			} else if (file.timestamp < remote.timestamp) {
-				this.uploadFileAsNew(file.path); // edição local mais antiga
+			} else if (existsInLocal && existsInRemote) {
+				if (file.timestamp !== existsInRemote.timestamp) {
+					this.downloadFile(file.path, null); // novo remoto, baixa
+				}
 			}
+
+			// - se o arquivo existe na nuvem mas não no local, baixa
+			// - se o arquivo existe local mas não na nuvem, upload/
+			// - se o arquivo existe nos dois locais, compara timestamp
+			// - se timestamp for igual, não faz nada
+			// - se for diferente, baixa arquivo como cópia e upload mesmo arquivo
 		}
 
 		// 3. Baixar novos arquivos da nuvem
 		for (const file of remoteFiles) {
 			if (!localFiles.find(f => f.path === file.path)) {
-				this.downloadFile(file.path); // novo remoto, baixa
+				this.downloadFile(file.path, null); // novo remoto, baixa
 			}
 		}
 	}
