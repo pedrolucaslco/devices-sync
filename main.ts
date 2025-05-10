@@ -42,11 +42,9 @@ export default class DevicesSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on('delete', (file: TFile) => {
-				if (this.app.vault.getAbstractFileByPath(file.path)) {
-					console.log('deleting file: ' + file.path);
-					// implementar
-					new Notice('Deleted file sync not implemented yet');
-				}
+				new Notice('Syncing deleted file...');
+				console.log('deleting file: ' + file.path);
+				this.deleteFile(file.path);
 			})
 		);
 
@@ -60,6 +58,16 @@ export default class DevicesSyncPlugin extends Plugin {
 			})
 		);
 
+	}
+
+	async deleteFile(path: string) {
+		console.log('deleteFile', path);
+
+		const supabase = this.getSupabaseClient();
+
+		const { data: fileData } = await supabase.storage
+			.from(this.bucketName)
+			.remove([path, path + '.meta.json']);
 	}
 
 	onunload() {
@@ -255,7 +263,10 @@ export default class DevicesSyncPlugin extends Plugin {
 			if (existsInRemote && !existsInLocal) {
 				this.downloadFile(file.path, null); // novo remoto, baixa
 			} else if (existsInLocal && !existsInRemote) {
-				this.uploadFile(file.path); // novo em local, envia para a nuvem
+				// this.uploadFile(file.path); // novo em local, envia para a nuvem
+
+				// pode ser um caso de arquivo que foi excluido na nuvem e ainda está no local
+				this.deleteLocalFile(file.path);
 			} else if (existsInLocal && existsInRemote) {
 				if (file.timestamp !== existsInRemote.timestamp) {
 					this.downloadFile(file.path, null); // novo remoto, baixa
@@ -268,6 +279,16 @@ export default class DevicesSyncPlugin extends Plugin {
 			if (!localFiles.find(f => f.path === file.path)) {
 				this.downloadFile(file.path, null); // novo remoto, baixa
 			}
+		}
+	}
+
+	async deleteLocalFile(path: string) {
+		console.log('deleteLocalFile', path);
+
+		const localFile = this.app.vault.getAbstractFileByPath(path);
+
+		if (localFile instanceof TFile) {
+			await this.app.vault.delete(localFile);
 		}
 	}
 
