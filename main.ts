@@ -50,14 +50,26 @@ export default class DevicesSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on('rename', (file: TFile, oldPath: string) => {
-				if (this.app.vault.getAbstractFileByPath(oldPath)) {
-					console.log('renaming file: ' + oldPath);
-					// implementar
-					new Notice('Renamed file sync not implemented yet');
-				}
+				new Notice('Syncing renamed file...');
+				console.log('renaming file: ' + oldPath);
+				this.renameFile(oldPath, file.path);
 			})
 		);
 
+	}
+
+	async renameFile(oldPath: string, newPath: string) {
+		console.log('renameFile', oldPath, newPath);
+
+		const supabase = this.getSupabaseClient();
+
+		const { data: fileData } = await supabase.storage
+			.from(this.bucketName)
+			.move(oldPath, newPath);
+
+		const { data: fileMetaData } = await supabase.storage
+			.from(this.bucketName)
+			.move(oldPath + '.meta.json', newPath + '.meta.json');
 	}
 
 	async deleteFile(path: string) {
