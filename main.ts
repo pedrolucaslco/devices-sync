@@ -21,9 +21,7 @@ export default class DevicesSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('create', (file: TFile) => {
 				if (this.app.vault.getAbstractFileByPath(file.path)) {
-
 					new Notice('Syncing created file...');
-
 					console.log('creating file: ' + file.path);
 					this.uploadFile(file.path);
 				}
@@ -58,6 +56,11 @@ export default class DevicesSyncPlugin extends Plugin {
 
 	}
 
+	onunload() {
+
+	}
+
+
 	async renameFile(oldPath: string, newPath: string) {
 		console.log('renameFile', oldPath, newPath);
 
@@ -80,10 +83,6 @@ export default class DevicesSyncPlugin extends Plugin {
 		const { data: fileData } = await supabase.storage
 			.from(this.bucketName)
 			.remove([path, path + '.meta.json']);
-	}
-
-	onunload() {
-
 	}
 
 	async getLocalFiles() {
@@ -140,14 +139,18 @@ export default class DevicesSyncPlugin extends Plugin {
 		if (!(file instanceof TFile)) return;
 
 		const content = await this.app.vault.readBinary(file);
+		console.log('before alias change: ' + file.path);
 		const alias = this.getAlias(file.path);
+		console.log('after alias change: ' + alias);
 		const ext = file.extension;
 		const filename = `${alias}`;
 		const mime = this.getMimeType(ext);
 
 		const fileBlob = new Blob([content], { type: mime });
 
-		await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
+		await supabase.storage
+			.from(this.bucketName)
+			.upload(filename, fileBlob, { upsert: true });
 
 		const metadata = {
 			originalName: file.name,
@@ -159,47 +162,6 @@ export default class DevicesSyncPlugin extends Plugin {
 			new Blob([JSON.stringify(metadata)], { type: 'application/json' }),
 			{ upsert: true }
 		);
-	}
-
-	async updateRemote(path: string) {
-		console.log('updateRemote', path);
-
-		const supabase = this.getSupabaseClient();
-
-		const file = this.app.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile)) return;
-
-		const content = await this.app.vault.readBinary(file);
-		const alias = this.getAlias(file.path);
-		const ext = file.extension;
-		const filename = `${alias}`;
-		const mime = this.getMimeType(ext);
-
-		const fileBlob = new Blob([content], { type: mime });
-
-		await supabase.storage.from(this.bucketName).upload(filename, fileBlob, { upsert: true });
-
-		const metadata = {
-			originalName: file.name,
-			originalPath: file.path,
-			timeStamp: file.stat.mtime,
-		};
-
-		await supabase.storage.from(this.bucketName).upload(`${filename}.meta.json`,
-			new Blob([JSON.stringify(metadata)], { type: 'application/json' }),
-			{ upsert: true }
-		);
-	}
-
-	async makeACopy(path: string) {
-		console.log('makeACopy', path);
-
-		const alias = path.split('.')[0];
-		const ext = path.split('.').pop();
-		const newFileName = `${alias} 1.${ext}`;
-
-		this.downloadFile(path, newFileName);
-		this.uploadFile(newFileName);
 	}
 
 	async downloadFile(path: string, newPath: string | null) {
@@ -245,7 +207,7 @@ export default class DevicesSyncPlugin extends Plugin {
 			console.log('localFile not found, creating new file');
 
 			const arrayBuffer = await fileData.arrayBuffer();
-			await this.app.vault.createBinary(path, arrayBuffer);
+			await this.app.vault.createBinary(localPath, arrayBuffer);
 		} else if (localFile instanceof TFile) {
 			console.log('localFile found, overwriting file');
 
@@ -255,6 +217,17 @@ export default class DevicesSyncPlugin extends Plugin {
 		} else {
 			console.log('localFile not TFile, skipping');
 		}
+	}
+
+	async makeACopy(path: string) {
+		console.log('makeACopy', path);
+
+		const alias = path.split('.')[0];
+		const ext = path.split('.').pop();
+		const newFileName = `${alias} 1.${ext}`;
+
+		this.downloadFile(path, newFileName);
+		this.uploadFile(newFileName);
 	}
 
 	async syncFiles() {
@@ -318,7 +291,15 @@ export default class DevicesSyncPlugin extends Plugin {
 	// }
 
 	getAlias(path: string): string {
-		return encodeURIComponent(normalizePath(path));
+		const newPath = path
+			.normalize("NFD")                        // separa acento da letra
+			.replace(/[\u0300-\u036f]/g, "")        // remove acentos
+			// .replace(/\s+/g, '-')                   // substitui espaços por hífens
+			.replace(/[^a-zA-Z0-9.-]/g, '')         // remove caracteres especiais (exceto ponto e hífen)
+			.toLowerCase();
+
+			console.log('newPath: ' + newPath);
+		return encodeURIComponent(normalizePath(newPath));
 	}
 
 	getMimeType(ext: string): string {
